@@ -7,7 +7,10 @@ Connects to the dump and forwards everything it says to every WebSocket listener
 ```
 PORT=3001
 DUMP_URL=http://localhost:8080/data/aircraft.json
+LOG=1
 ```
+
+Read at startup, so `npm start` alone is enough. Variables set on the command line still win.
 
 `DUMP_URL` accepts:
 

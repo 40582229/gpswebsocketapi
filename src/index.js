@@ -1,5 +1,13 @@
 // One job: connect to the dump, forward everything it says to every listener.
 const http = require('http');
+
+// Read .env if there is one. Real env vars still win (loadEnvFile never overrides).
+try {
+  process.loadEnvFile();
+} catch {
+  // no .env, or Node older than 20.12
+}
+
 const net = require('net');
 const WebSocket = require('ws');
 
