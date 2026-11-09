@@ -56,7 +56,7 @@ function connectDump() {
         const res = await fetch(url);
         send(await res.text());
       } catch (err) {
-        console.error('dump poll failed:', err.message);
+        console.error('dump poll failed:', url.href, err.message);
       }
       setTimeout(poll, 1000);
     })();
