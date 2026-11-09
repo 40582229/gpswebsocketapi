@@ -9,6 +9,7 @@ try {
 }
 
 const net = require('net');
+const os = require('os');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3001;
@@ -16,12 +17,29 @@ const LOG = process.env.LOG === '1';
 const DUMP_URL = process.env.DUMP_URL || 'http://localhost:8080/data/aircraft.json';
 const STALE_MS = 30_000;
 
+// dump1090's web server, for the one field SBS drops: the emitter category.
+// Defaults to the same host as the dump, port 8080.
+const CATEGORY_URL = (() => {
+  if (process.env.CATEGORY_URL) return process.env.CATEGORY_URL;
+  const url = new URL(DUMP_URL);
+  if (url.protocol === 'http:' || url.protocol === 'https:') return url.href;
+  const proto = url.protocol === 'wss:' ? 'https:' : 'http:';
+  return `${proto}//${url.hostname}:8080/data/aircraft.json`;
+})();
+
 // ---- listeners -----------------------------------------------------------
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
 // hex -> everything heard about that aircraft so far
 const aircraft = new Map();
+// hex -> emitter category, refilled from aircraft.json
+const categories = new Map();
+
+// Only aircraft with a position can be drawn, so only those are sent.
+function positioned(a) {
+  return a.lat !== undefined && a.lon !== undefined;
+}
 
 function send(data) {
   for (const client of wss.clients) {
@@ -32,7 +50,7 @@ function send(data) {
 wss.on('connection', (ws) => {
   console.log('listener connected, total', wss.clients.size);
   // catch the newcomer up on everything already known
-  for (const a of aircraft.values()) ws.send(JSON.stringify(a));
+  for (const a of aircraft.values()) if (positioned(a)) ws.send(JSON.stringify(a));
 });
 
 // forget aircraft nothing has been heard from in a while
@@ -65,8 +83,29 @@ function parseSbs(line) {
 
 function merge(msg) {
   const merged = { ...aircraft.get(msg.hex), ...msg, lastSeen: Date.now() };
+  if (categories.has(msg.hex)) merged.category = categories.get(msg.hex);
   aircraft.set(msg.hex, merged);
   return merged;
+}
+
+// ---- emitter category, from aircraft.json ---------------------------------
+let lastPollError = '';
+
+async function pollCategories() {
+  try {
+    const res = await fetch(CATEGORY_URL);
+    const data = await res.json();
+    for (const a of data.aircraft ?? []) {
+      if (a.hex && a.category) categories.set(a.hex.toUpperCase(), a.category);
+    }
+    lastPollError = '';
+  } catch (err) {
+    if (err.message !== lastPollError) {
+      lastPollError = err.message;
+      console.error('category poll failed:', CATEGORY_URL, err.message);
+    }
+  }
+  setTimeout(pollCategories, 2000);
 }
 
 // ---- the dump ------------------------------------------------------------
@@ -101,7 +140,10 @@ function connectDump() {
       for (const line of lines) {
         const msg = parseSbs(line);
         if (!msg) continue;
-        const json = JSON.stringify(merge(msg));
+        const merged = merge(msg);
+        // heard but not yet located: keep merging, don't send yet
+        if (!positioned(merged)) continue;
+        const json = JSON.stringify(merged);
         if (LOG) console.log(json);
         send(json);
       }
@@ -124,7 +166,14 @@ function connectDump() {
 }
 
 connectDump();
+if (CATEGORY_URL !== DUMP_URL) pollCategories();
 
+// 0.0.0.0 = every interface, so anything on the LAN can connect
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`listening on ws://localhost:${PORT} <- ${DUMP_URL}`);
+  console.log(`listening on port ${PORT} <- ${DUMP_URL}`);
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const iface of ifaces ?? []) {
+      if (iface.family === 'IPv4' && !iface.internal) console.log(`  ws://${iface.address}:${PORT}`);
+    }
+  }
 });
