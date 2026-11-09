@@ -1,4 +1,4 @@
-// One job: connect to the dump, forward everything it says to every listener.
+// One job: connect to the dump, merge what it says per aircraft, forward that to every listener.
 const http = require('http');
 
 // Read .env if there is one. Real env vars still win (loadEnvFile never overrides).
@@ -14,10 +14,14 @@ const WebSocket = require('ws');
 const PORT = process.env.PORT || 3001;
 const LOG = process.env.LOG === '1';
 const DUMP_URL = process.env.DUMP_URL || 'http://localhost:8080/data/aircraft.json';
+const STALE_MS = 30_000;
 
 // ---- listeners -----------------------------------------------------------
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
+
+// hex -> everything heard about that aircraft so far
+const aircraft = new Map();
 
 function send(data) {
   for (const client of wss.clients) {
@@ -25,11 +29,19 @@ function send(data) {
   }
 }
 
-wss.on('connection', () => {
+wss.on('connection', (ws) => {
   console.log('listener connected, total', wss.clients.size);
+  // catch the newcomer up on everything already known
+  for (const a of aircraft.values()) ws.send(JSON.stringify(a));
 });
 
-// ---- SBS-1 lines -> one JSON object per message --------------------------
+// forget aircraft nothing has been heard from in a while
+setInterval(() => {
+  const cutoff = Date.now() - STALE_MS;
+  for (const [hex, a] of aircraft) if (a.lastSeen < cutoff) aircraft.delete(hex);
+}, 5000);
+
+// ---- SBS-1 lines -> merged per-aircraft JSON -----------------------------
 // MSG,<type>,<session>,<aircraft id>,<hex>,<flight id>,<date gen>,<time gen>,
 // <date log>,<time log>,<callsign>,<alt>,<speed>,<track>,<lat>,<lon>,
 // <vert rate>,<squawk>,<alert>,<emergency>,<spi>,<on ground>
@@ -51,9 +63,15 @@ function parseSbs(line) {
   return msg;
 }
 
+function merge(msg) {
+  const merged = { ...aircraft.get(msg.hex), ...msg, lastSeen: Date.now() };
+  aircraft.set(msg.hex, merged);
+  return merged;
+}
+
 // ---- the dump ------------------------------------------------------------
 // ws://host:port   dump pushes frames        (readsb --net-connector, or a ws bridge)
-// tcp://host:30003 SBS-1 lines, sent as JSON (dump1090 --net-sbs-port 30003)
+// tcp://host:30003 SBS-1 lines, merged per aircraft
 // http://host:8080 poll aircraft.json 1/s    (dump1090-fa default web server)
 function connectDump() {
   const url = new URL(DUMP_URL);
@@ -83,7 +101,7 @@ function connectDump() {
       for (const line of lines) {
         const msg = parseSbs(line);
         if (!msg) continue;
-        const json = JSON.stringify(msg);
+        const json = JSON.stringify(merge(msg));
         if (LOG) console.log(json);
         send(json);
       }
